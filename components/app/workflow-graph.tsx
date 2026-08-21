@@ -19,55 +19,66 @@ import {
   NodeTitle,
 } from "@/components/ai-elements/node";
 import { Panel } from "@/components/ai-elements/panel";
-import { columnKey } from "@/lib/audit-schema";
+import { columnKey } from "@/lib/columns";
 import { cn } from "@/lib/utils";
 import type {
+  AgentRun,
+  AgentStatus,
   AuditState,
   ColumnDef,
   ExtractionState,
   LeaseDoc,
 } from "@/lib/types";
 
-type StageTone = "idle" | "active" | "done" | "error";
+/** Mirrors lib/agent/subagents.ts — the roster is fixed, so the console can
+ *  render the whole constellation before a single agent has started. */
+const DETECTORS = [
+  { type: "rent-and-charges-auditor", title: "RENT & CHARGES", beat: "Rent, escalations, deposits, pass-throughs" },
+  { type: "liability-and-covenant-auditor", title: "LIABILITY & COVENANTS", beat: "Indemnity, insurance, assignment, default" },
+  { type: "critical-date-auditor", title: "CRITICAL DATES", beat: "Terms, options, notice windows, auto-renewal" },
+  { type: "portfolio-reconciler", title: "RECONCILIATION", beat: "Contradictions across documents" },
+] as const;
 
-const TONE_CLASS: Record<StageTone, string> = {
-  idle: "text-muted-foreground/60",
-  active: "text-primary animate-status-pulse",
+const GATE = "materiality-gate";
+
+const TONE_CLASS: Record<AgentStatus, string> = {
+  pending: "text-muted-foreground/50",
+  running: "text-primary animate-status-pulse",
   done: "text-ok",
   error: "text-critical",
 };
 
-interface StageNodeData {
+interface AgentNodeData {
   label: string;
   title: string;
   description: string;
-  tone: StageTone;
+  status: AgentStatus;
   metric?: string;
   isHead?: boolean;
   isTail?: boolean;
   [key: string]: unknown;
 }
 
-function StageNode({ data }: FlowNodeProps) {
-  const node = data as StageNodeData;
+function AgentNode({ data }: FlowNodeProps) {
+  const node = data as AgentNodeData;
   return (
     <Node
       handles={{ target: !node.isHead, source: !node.isTail }}
       className={cn(
-        "w-52 rounded-sm border-border/80 bg-card/95 transition-colors duration-300",
-        node.tone === "active" && "border-primary/60",
-        node.tone === "error" && "border-critical/60"
+        "w-56 rounded-sm border-border/80 bg-card/95 transition-colors duration-300",
+        node.status === "running" && "border-primary/60",
+        node.status === "error" && "border-critical/60"
       )}
     >
       <NodeHeader className="flex-row items-center justify-between gap-2 rounded-t-sm bg-secondary/60 px-3 py-2!">
         <span className="microlabel text-[9px]">{node.label}</span>
-        <span className={cn("status-dot", TONE_CLASS[node.tone])} />
+        <span className={cn("status-dot", TONE_CLASS[node.status])} />
       </NodeHeader>
       <NodeContent className="flex flex-col gap-1 px-3 py-2.5">
         <NodeTitle className="font-mono text-xs font-semibold tracking-wide">
           {node.title}
         </NodeTitle>
-        <NodeDescription className="text-[10px] leading-relaxed">
+        <NodeDescription className="truncate text-[10px] leading-relaxed" title={node.description}>
           {node.description}
         </NodeDescription>
         {node.metric && (
@@ -82,7 +93,8 @@ function StageNode({ data }: FlowNodeProps) {
 
 interface DocNodeData {
   name: string;
-  tone: StageTone;
+  status: AgentStatus;
+  activity: string;
   filled: number;
   total: number;
   [key: string]: unknown;
@@ -95,14 +107,14 @@ function DocNode({ data }: FlowNodeProps) {
     <Node
       handles={{ target: true, source: true }}
       className={cn(
-        "w-52 rounded-sm border-border/80 bg-card/95 transition-colors duration-300",
-        node.tone === "active" && "border-primary/60",
-        node.tone === "error" && "border-critical/60"
+        "w-56 rounded-sm border-border/80 bg-card/95 transition-colors duration-300",
+        node.status === "running" && "border-primary/60",
+        node.status === "error" && "border-critical/60"
       )}
     >
       <NodeContent className="flex flex-col gap-1.5 px-3 py-2">
         <div className="flex items-center gap-2">
-          <span className={cn("status-dot", TONE_CLASS[node.tone])} />
+          <span className={cn("status-dot", TONE_CLASS[node.status])} />
           <span className="min-w-0 flex-1 truncate font-mono text-[10px]" title={node.name}>
             {node.name}
           </span>
@@ -114,12 +126,15 @@ function DocNode({ data }: FlowNodeProps) {
           <div
             className={cn(
               "h-full transition-[width] duration-500 ease-out",
-              node.tone === "error" ? "bg-critical" : "bg-primary",
-              node.tone === "active" && "stream-shimmer"
+              node.status === "error" ? "bg-critical" : "bg-primary",
+              node.status === "running" && "stream-shimmer"
             )}
             style={{ width: `${Math.round(ratio * 100)}%` }}
           />
         </div>
+        <span className="truncate font-mono text-[9px] text-muted-foreground/70" title={node.activity}>
+          {node.activity}
+        </span>
       </NodeContent>
     </Node>
   );
@@ -211,185 +226,222 @@ function PipelineEdge({
   );
 }
 
-const nodeTypes = { stage: StageNode, doc: DocNode };
+const nodeTypes = { agent: AgentNode, doc: DocNode };
 const edgeTypes = { pipeline: PipelineEdge };
 
-const DOC_SPACING = 72;
-const COL_X = [0, 300, 600, 900];
+const ROW_SPACING = 84;
+const COL_X = [0, 300, 620, 940, 1240];
 
 interface GraphInputs {
   docs: LeaseDoc[];
   activeColumns: ColumnDef[];
   extractions: Record<string, ExtractionState>;
+  agents: AgentRun[];
   audit: AuditState;
 }
 
-/** Full graph snapshot: layout from doc list, data/edge state from progress. */
-function computeGraph({ docs, activeColumns, extractions, audit }: GraphInputs) {
-  const keys = activeColumns.map((column) => columnKey(column.name));
-  const docCount = Math.max(docs.length, 1);
-  const centerY = ((docCount - 1) * DOC_SPACING) / 2;
+function edgeState(status: AgentStatus): EdgeState {
+  if (status === "running") return "active";
+  return status === "pending" ? "idle" : "done";
+}
 
-  const docTone = (state: ExtractionState | undefined): StageTone =>
-    state?.status === "extracting"
-      ? "active"
-      : state?.status === "extracted"
-        ? "done"
-        : state?.status === "error"
-          ? "error"
-          : "idle";
+/**
+ * Full graph snapshot. Layout comes from the document list and the fixed agent
+ * roster; every tone, metric, and edge state comes from live run state, so a
+ * data update never moves a node the user has dragged.
+ */
+function computeGraph({ docs, activeColumns, extractions, agents, audit }: GraphInputs) {
+  const keys = activeColumns.map((column) => columnKey(column.name));
+  const byType = new Map<string, AgentRun>();
+  for (const agent of agents) {
+    if (agent.type !== "lease-abstractor") byType.set(agent.type, agent);
+  }
+  const abstractorFor = (docId: string) =>
+    agents.find((agent) => agent.type === "lease-abstractor" && agent.leaseId === docId);
+
+  const lead = agents.find((agent) => agent.id === "lead");
+  const gate = byType.get(GATE);
+  const rows = Math.max(docs.length, DETECTORS.length, 1);
+  const centerY = ((rows - 1) * ROW_SPACING) / 2;
+
+  const docStatus = (docId: string): AgentStatus => {
+    const state = extractions[docId];
+    if (state?.status === "extracted") return "done";
+    if (state?.status === "error") return "error";
+    if (state?.status === "extracting") return "running";
+    return abstractorFor(docId)?.status ?? "pending";
+  };
 
   const nodes: FlowNode[] = [
     {
-      id: "schema",
-      type: "stage",
+      id: "lead",
+      type: "agent",
       position: { x: COL_X[0], y: centerY - 40 },
       data: {
-        label: "STAGE 01",
-        title: "SCHEMA",
-        description: "User-defined extraction columns",
-        tone: activeColumns.length ? "done" : "idle",
-        metric: `${activeColumns.length} FIELDS DEFINED`,
+        label: "ORCHESTRATOR",
+        title: "LEAD AUDITOR",
+        description: lead?.activity || "Awaiting a portfolio",
+        status: lead?.status ?? "pending",
+        metric: `${activeColumns.length} FIELDS · ${docs.length} DOCS`,
         isHead: true,
-      } satisfies StageNodeData,
+      } satisfies AgentNodeData,
     },
     ...(docs.length
-      ? []
+      ? docs.map((doc, index) => {
+          const status = docStatus(doc.id);
+          const agent = abstractorFor(doc.id);
+          const filled = keys.filter(
+            (key) => extractions[doc.id]?.record[key]?.value !== undefined
+          ).length;
+          return {
+            id: `doc-${doc.id}`,
+            type: "doc",
+            position: { x: COL_X[1], y: index * ROW_SPACING },
+            data: {
+              name: doc.name,
+              status,
+              activity: agent?.activity ?? "lease-abstractor",
+              filled,
+              total: keys.length,
+            } satisfies DocNodeData,
+          } as FlowNode;
+        })
       : [
           {
-            id: "intake-placeholder",
-            type: "stage",
+            id: "intake",
+            type: "agent",
             position: { x: COL_X[1], y: centerY - 40 },
             data: {
-              label: "STAGE 02",
-              title: "DOCUMENT INTAKE",
-              description: "Awaiting lease uploads",
-              tone: "idle",
-            } satisfies StageNodeData,
+              label: "STAGE 01",
+              title: "ABSTRACTORS",
+              description: "One agent per lease, dispatched in parallel",
+              status: "pending",
+            } satisfies AgentNodeData,
           } as FlowNode,
         ]),
-    ...docs.map((doc, index) => {
-      const state = extractions[doc.id];
-      const filled = keys.filter(
-        (key) => state?.record[key]?.value !== undefined
+    ...DETECTORS.map((detector, index) => {
+      const agent = byType.get(detector.type);
+      const filed = audit.candidates.filter(
+        (candidate) => candidate.raisedBy === detector.type
       ).length;
       return {
-        id: doc.id,
-        type: "doc",
-        position: { x: COL_X[1], y: index * DOC_SPACING },
+        id: detector.type,
+        type: "agent",
+        position: { x: COL_X[2], y: index * ROW_SPACING },
         data: {
-          name: doc.name,
-          tone: docTone(state),
-          filled,
-          total: keys.length,
-        } satisfies DocNodeData,
-      };
+          label: "DETECTOR",
+          title: detector.title,
+          description: agent?.activity || detector.beat,
+          status: agent?.status ?? "pending",
+          metric: filed ? `${filed} CANDIDATE${filed === 1 ? "" : "S"}` : undefined,
+        } satisfies AgentNodeData,
+      } as FlowNode;
     }),
     {
-      id: "audit",
-      type: "stage",
-      position: { x: COL_X[2], y: centerY - 40 },
+      id: GATE,
+      type: "agent",
+      position: { x: COL_X[3], y: centerY - 40 },
       data: {
-        label: "STAGE 03",
-        title: "CROSS-LEASE AUDIT",
-        description: "Reconciles extracted fields across the portfolio",
-        tone:
-          audit.status === "running"
-            ? "active"
-            : audit.status === "complete"
-              ? "done"
-              : audit.status === "error"
-                ? "error"
-                : "idle",
-        metric:
-          audit.status === "idle" ? undefined : `${audit.findings.length} FINDINGS`,
-      } satisfies StageNodeData,
+        label: "GATE",
+        title: "MATERIALITY GATE",
+        description:
+          gate?.activity || "Refutes every candidate; publishes only major exposure",
+        status: gate?.status ?? "pending",
+        metric: audit.dismissals.length
+          ? `${audit.dismissals.length} SUPPRESSED`
+          : undefined,
+      } satisfies AgentNodeData,
     },
     {
       id: "report",
-      type: "stage",
-      position: { x: COL_X[3], y: centerY - 40 },
+      type: "agent",
+      position: { x: COL_X[4], y: centerY - 40 },
       data: {
-        label: "STAGE 04",
-        title: "INTEGRITY REPORT",
-        description: "Severity-ranked mismatch findings",
-        tone:
+        label: "OUTPUT",
+        title: "EXPOSURE REPORT",
+        description: "Confirmed monetary and litigation exposure",
+        status:
           audit.status === "complete"
-            ? audit.findings.some((f) => f.severity === "critical")
+            ? audit.findings.some((finding) => finding.severity === "critical")
               ? "error"
               : "done"
             : audit.status === "running"
-              ? "active"
-              : "idle",
+              ? "running"
+              : "pending",
         metric: audit.risk ? `RISK: ${audit.risk.toUpperCase()}` : undefined,
         isTail: true,
-      } satisfies StageNodeData,
+      } satisfies AgentNodeData,
     },
   ];
 
+  const detectorsRunning = DETECTORS.some(
+    (detector) => byType.get(detector.type)?.status === "running"
+  );
+
   const edges: FlowEdge[] = [
     ...(docs.length
-      ? []
+      ? docs.flatMap((doc) => {
+          const status = docStatus(doc.id);
+          return [
+            {
+              id: `lead-${doc.id}`,
+              source: "lead",
+              target: `doc-${doc.id}`,
+              type: "pipeline",
+              data: { state: edgeState(status) } satisfies PipelineEdgeData,
+            },
+            ...DETECTORS.map((detector) => ({
+              id: `${doc.id}-${detector.type}`,
+              source: `doc-${doc.id}`,
+              target: detector.type,
+              type: "pipeline",
+              data: {
+                state:
+                  status !== "done"
+                    ? ("idle" as EdgeState)
+                    : detectorsRunning
+                      ? ("active" as EdgeState)
+                      : byType.get(detector.type)?.status === "done"
+                        ? ("done" as EdgeState)
+                        : ("idle" as EdgeState),
+              } satisfies PipelineEdgeData,
+            })),
+          ];
+        })
       : [
           {
-            id: "schema-intake",
-            source: "schema",
-            target: "intake-placeholder",
+            id: "lead-intake",
+            source: "lead",
+            target: "intake",
             type: "pipeline",
             data: { state: "idle" } satisfies PipelineEdgeData,
           },
-          {
-            id: "intake-audit",
-            source: "intake-placeholder",
-            target: "audit",
+          ...DETECTORS.map((detector) => ({
+            id: `intake-${detector.type}`,
+            source: "intake",
+            target: detector.type,
             type: "pipeline",
             data: { state: "idle" } satisfies PipelineEdgeData,
-          },
+          })),
         ]),
-    ...docs.flatMap((doc) => {
-      const tone = docTone(extractions[doc.id]);
-      // Inbound animates only while this document is extracting; outbound
-      // activates only once extraction completes and its data is handed to
-      // the audit stage, settling when the audit finishes.
-      const inbound: EdgeState =
-        tone === "active" ? "active" : tone === "done" || tone === "error" ? "done" : "idle";
-      const outbound: EdgeState =
-        tone === "done"
-          ? audit.status === "complete" || audit.status === "error"
-            ? "done"
-            : "active"
-          : "idle";
-      return [
-        {
-          id: `schema-${doc.id}`,
-          source: "schema",
-          target: doc.id,
-          type: "pipeline",
-          data: { state: inbound } satisfies PipelineEdgeData,
-        },
-        {
-          id: `${doc.id}-audit`,
-          source: doc.id,
-          target: "audit",
-          type: "pipeline",
-          data: { state: outbound } satisfies PipelineEdgeData,
-        },
-      ];
-    }),
+    ...DETECTORS.map((detector) => ({
+      id: `${detector.type}-gate`,
+      source: detector.type,
+      target: GATE,
+      type: "pipeline",
+      data: {
+        state: edgeState(byType.get(detector.type)?.status ?? "pending"),
+      } satisfies PipelineEdgeData,
+    })),
     {
-      id: "audit-report",
-      source: "audit",
+      id: "gate-report",
+      source: GATE,
       target: "report",
       type: "pipeline",
       data: {
-        state:
-          audit.status === "running"
-            ? "active"
-            : audit.status === "complete"
-              ? "done"
-              : "idle",
-        // The report receives the result when the audit finishes, so the
-        // handoff pulse fires on completion rather than when streaming starts.
+        state: edgeState(gate?.status ?? "pending"),
+        // The report is written when the gate finishes ruling, so the handoff
+        // pulse fires on completion rather than when the gate starts.
         pulseOn: "done",
       } satisfies PipelineEdgeData,
     },
@@ -402,6 +454,7 @@ interface WorkflowGraphProps {
   docs: LeaseDoc[];
   columns: ColumnDef[];
   extractions: Record<string, ExtractionState>;
+  agents: AgentRun[];
   audit: AuditState;
 }
 
@@ -409,6 +462,7 @@ export function WorkflowGraph({
   docs,
   columns,
   extractions,
+  agents,
   audit,
 }: WorkflowGraphProps) {
   const instanceRef = useRef<ReactFlowInstance | null>(null);
@@ -421,8 +475,8 @@ export function WorkflowGraph({
   );
 
   const graph = useMemo(
-    () => computeGraph({ docs, activeColumns, extractions, audit }),
-    [docs, activeColumns, extractions, audit]
+    () => computeGraph({ docs, activeColumns, extractions, agents, audit }),
+    [docs, activeColumns, extractions, agents, audit]
   );
 
   const structureKey = docs.map((doc) => doc.id).join("|");
@@ -438,13 +492,13 @@ export function WorkflowGraph({
       setNodes(graph.nodes);
       setEdges(graph.edges);
       const id = requestAnimationFrame(() => {
-        void instanceRef.current?.fitView({ duration: 350, padding: 0.18 });
+        void instanceRef.current?.fitView({ duration: 350, padding: 0.16 });
       });
       return () => cancelAnimationFrame(id);
     }
 
-    // Data pass: streaming progress only mutates node data and edge state,
-    // never positions — nodes stay put (and stay draggable) mid-run.
+    // Data pass: run progress only mutates node data and edge state, never
+    // positions — nodes stay put (and stay draggable) mid-run.
     const freshNodes = new Map(graph.nodes.map((node) => [node.id, node]));
     setNodes((prev) =>
       prev.map((node) => {
@@ -475,11 +529,11 @@ export function WorkflowGraph({
       nodesConnectable={false}
       nodesDraggable
       proOptions={{ hideAttribution: true }}
-      minZoom={0.4}
+      minZoom={0.3}
       maxZoom={1.5}
     >
       <Panel position="top-left" className="m-3 border-border/80 bg-card/90 px-2.5 py-1.5">
-        <span className="microlabel text-[9px]">Audit pipeline</span>
+        <span className="microlabel text-[9px]">Agent constellation</span>
       </Panel>
       <Controls showInteractive={false} />
     </Canvas>

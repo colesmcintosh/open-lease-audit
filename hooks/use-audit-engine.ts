@@ -1,19 +1,19 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
-import { columnKey, type AuditResultPayload } from "@/lib/audit-schema";
-import { streamPartialObject } from "@/lib/stream-client";
+import type { AuditEvent } from "@/lib/audit-events";
+import { columnKey } from "@/lib/columns";
+import { CONNECTORS, type ConnectorConfig } from "@/lib/connectors";
+import { consumeAuditStream } from "@/lib/event-stream";
 import type {
+  AgentRun,
   AuditState,
   ColumnDef,
-  ExtractionRecord,
   ExtractionState,
   Finding,
   LeaseDoc,
   Phase,
 } from "@/lib/types";
-
-const EXTRACTION_CONCURRENCY = 3;
 
 export const DEFAULT_COLUMNS: ColumnDef[] = [
   {
@@ -70,7 +70,20 @@ const EMPTY_AUDIT: AuditState = {
   status: "idle",
   risk: null,
   verdict: "",
+  totalExposureUsd: null,
   findings: [],
+  candidates: [],
+  dismissals: [],
+  costUsd: null,
+};
+
+const LEAD_AGENT: AgentRun = {
+  id: "lead",
+  type: "lead",
+  label: "Lead auditor",
+  status: "running",
+  activity: "Planning the pipeline",
+  toolCalls: 0,
 };
 
 function newId(prefix: string) {
@@ -109,40 +122,13 @@ function fileToDoc(file: File): Promise<LeaseDoc> {
   });
 }
 
-const SEVERITIES = ["critical", "warning", "info"] as const;
-const RISKS = ["low", "elevated", "high"] as const;
-
-/**
- * Coerces a partial streamed audit payload into renderable state. Enum values
- * can arrive as incomplete strings mid-stream (e.g. "warni"), so anything that
- * is not an exact match falls back to a safe default.
- */
-function normalizeAudit(partial: Partial<AuditResultPayload>): Omit<AuditState, "status"> {
-  const findings: Finding[] = (partial.findings ?? [])
-    .filter((finding): finding is NonNullable<typeof finding> => Boolean(finding))
-    .map((finding) => ({
-      title: finding.title ?? "",
-      severity: SEVERITIES.includes(finding.severity as Finding["severity"])
-        ? (finding.severity as Finding["severity"])
-        : "info",
-      columns: (finding.columns ?? []).filter(Boolean) as string[],
-      leases: (finding.leases ?? []).filter(Boolean) as string[],
-      detail: finding.detail ?? "",
-      recommendation: finding.recommendation ?? "",
-    }));
-  return {
-    risk: RISKS.includes(partial.risk as NonNullable<AuditState["risk"]>)
-      ? (partial.risk as AuditState["risk"])
-      : null,
-    verdict: partial.verdict ?? "",
-    findings,
-  };
-}
-
 export function useAuditEngine() {
   const [columns, setColumns] = useState<ColumnDef[]>(DEFAULT_COLUMNS);
   const [docs, setDocs] = useState<LeaseDoc[]>([]);
+  const [connectors, setConnectors] = useState<ConnectorConfig[]>([]);
   const [extractions, setExtractions] = useState<Record<string, ExtractionState>>({});
+  const [agents, setAgents] = useState<AgentRun[]>([]);
+  const [leadNote, setLeadNote] = useState("");
   const [audit, setAudit] = useState<AuditState>(EMPTY_AUDIT);
   const [isRunning, setIsRunning] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -182,11 +168,177 @@ export function useAuditEngine() {
     });
   }, []);
 
+  /** Connector credentials live in memory only — they are never persisted. */
+  const connectConnector = useCallback((config: ConnectorConfig) => {
+    setConnectors((prev) => [
+      ...prev.filter((entry) => entry.id !== config.id),
+      config,
+    ]);
+  }, []);
+
+  const disconnectConnector = useCallback((id: string) => {
+    setConnectors((prev) => prev.filter((entry) => entry.id !== id));
+  }, []);
+
   const reset = useCallback(() => {
     abortRef.current?.abort();
+    abortRef.current = null;
     setExtractions({});
+    setAgents([]);
+    setLeadNote("");
     setAudit(EMPTY_AUDIT);
     setIsRunning(false);
+  }, []);
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setAgents((prev) =>
+      prev.map((agent) =>
+        agent.status === "running" ? { ...agent, status: "done" } : agent
+      )
+    );
+    setAudit((prev) => (prev.status === "running" ? { ...prev, status: "complete" } : prev));
+    setIsRunning(false);
+  }, []);
+
+  const applyEvent = useCallback((event: AuditEvent) => {
+    switch (event.type) {
+      case "run_started":
+        setExtractions(
+          Object.fromEntries(
+            event.leases.map((lease) => [lease.id, { status: "queued", record: {} }])
+          )
+        );
+        setAgents([LEAD_AGENT]);
+        break;
+
+      case "agent_started":
+        setAgents((prev) => [
+          ...prev.filter((agent) => agent.id !== event.id),
+          {
+            id: event.id,
+            type: event.agent,
+            label: event.label,
+            status: "running",
+            activity: "Reading the brief",
+            toolCalls: 0,
+            ...(event.leaseId ? { leaseId: event.leaseId } : {}),
+          },
+        ]);
+        if (event.leaseId) {
+          setExtractions((prev) => ({
+            ...prev,
+            [event.leaseId!]: {
+              status: "extracting",
+              record: prev[event.leaseId!]?.record ?? {},
+            },
+          }));
+        }
+        break;
+
+      case "agent_activity":
+        setAgents((prev) =>
+          prev.map((agent) =>
+            agent.id === event.id
+              ? { ...agent, activity: event.activity, toolCalls: agent.toolCalls + 1 }
+              : agent
+          )
+        );
+        break;
+
+      case "agent_finished":
+        setAgents((prev) =>
+          prev.map((agent) =>
+            agent.id === event.id
+              ? { ...agent, status: event.status, activity: "Reported" }
+              : agent
+          )
+        );
+        break;
+
+      case "lead_note":
+        setLeadNote(event.text);
+        setAgents((prev) =>
+          prev.map((agent) =>
+            agent.id === "lead" ? { ...agent, activity: event.text } : agent
+          )
+        );
+        break;
+
+      case "abstract":
+        setExtractions((prev) => ({
+          ...prev,
+          [event.leaseId]: { status: "extracted", record: event.fields },
+        }));
+        break;
+
+      case "candidate":
+        setAudit((prev) => ({
+          ...prev,
+          status: "running",
+          candidates: [...prev.candidates, event.candidate],
+        }));
+        break;
+
+      case "finding":
+        setAudit((prev) => ({
+          ...prev,
+          status: "running",
+          findings: [...prev.findings, event.finding],
+        }));
+        break;
+
+      case "dismissal":
+        setAudit((prev) => ({
+          ...prev,
+          dismissals: [...prev.dismissals, event.dismissal],
+        }));
+        break;
+
+      case "summary":
+        setAudit((prev) => ({
+          ...prev,
+          risk: event.risk,
+          verdict: event.verdict,
+          totalExposureUsd: event.totalExposureUsd,
+        }));
+        break;
+
+      case "error":
+        setAudit((prev) => ({ ...prev, status: "error", error: event.message }));
+        break;
+
+      case "done":
+        setAudit((prev) => ({
+          ...prev,
+          status: prev.status === "error" ? "error" : "complete",
+          costUsd: event.costUsd,
+        }));
+        setAgents((prev) =>
+          prev.map((agent) =>
+            agent.status === "running" ? { ...agent, status: "done" } : agent
+          )
+        );
+        // Any lease no agent ever reported on stays honest about that.
+        setExtractions((prev) =>
+          Object.fromEntries(
+            Object.entries(prev).map(([id, state]) =>
+              state.status === "extracted"
+                ? [id, state]
+                : [
+                    id,
+                    {
+                      ...state,
+                      status: "error",
+                      error: "No abstract was reported for this lease.",
+                    },
+                  ]
+            )
+          )
+        );
+        break;
+    }
   }, []);
 
   const run = useCallback(async () => {
@@ -198,133 +350,89 @@ export function useAuditEngine() {
     abortRef.current = controller;
 
     setIsRunning(true);
-    setAudit(EMPTY_AUDIT);
-    setExtractions(
-      Object.fromEntries(
-        docs.map((doc) => [doc.id, { status: "queued", record: {} }])
-      )
-    );
-
-    const results = new Map<string, ExtractionRecord>();
-    const queue = [...docs];
-
-    const worker = async () => {
-      while (queue.length) {
-        const doc = queue.shift();
-        if (!doc) return;
-        setExtractions((prev) => ({
-          ...prev,
-          [doc.id]: { status: "extracting", record: {} },
-        }));
-        try {
-          const record = await streamPartialObject<ExtractionRecord>({
-            url: "/api/extract",
-            body: {
-              columns: activeColumns,
-              doc: { name: doc.name, kind: doc.kind, data: doc.data },
-            },
-            signal: controller.signal,
-            onPartial: (partial) =>
-              setExtractions((prev) => ({
-                ...prev,
-                [doc.id]: { status: "extracting", record: partial },
-              })),
-          });
-          results.set(doc.id, record);
-          setExtractions((prev) => ({
-            ...prev,
-            [doc.id]: { status: "extracted", record },
-          }));
-        } catch (error) {
-          if (controller.signal.aborted) return;
-          setExtractions((prev) => ({
-            ...prev,
-            [doc.id]: {
-              status: "error",
-              record: prev[doc.id]?.record ?? {},
-              error: error instanceof Error ? error.message : "Extraction failed",
-            },
-          }));
-        }
-      }
-    };
-
-    await Promise.all(
-      Array.from(
-        { length: Math.min(EXTRACTION_CONCURRENCY, docs.length) },
-        worker
-      )
-    );
-
-    if (controller.signal.aborted) return;
-
-    if (results.size < 1) {
-      setAudit({
-        ...EMPTY_AUDIT,
-        status: "error",
-        error: "No leases were extracted successfully.",
-      });
-      setIsRunning(false);
-      return;
-    }
-
+    setLeadNote("");
+    setAgents([LEAD_AGENT]);
     setAudit({ ...EMPTY_AUDIT, status: "running" });
+    setExtractions(
+      Object.fromEntries(docs.map((doc) => [doc.id, { status: "queued", record: {} }]))
+    );
+
     try {
-      const rows = docs
-        .filter((doc) => results.has(doc.id))
-        .map((doc) => ({ lease: doc.name, fields: results.get(doc.id) }));
-      const final = await streamPartialObject<Partial<AuditResultPayload>>({
+      await consumeAuditStream({
         url: "/api/audit",
-        body: { columns: activeColumns, rows },
+        body: { columns: activeColumns, docs, connectors },
         signal: controller.signal,
-        onPartial: (partial) =>
-          setAudit({ status: "running", ...normalizeAudit(partial) }),
+        onEvent: applyEvent,
       });
-      setAudit({ status: "complete", ...normalizeAudit(final) });
     } catch (error) {
       if (!controller.signal.aborted) {
-        setAudit({
-          ...EMPTY_AUDIT,
+        setAudit((prev) => ({
+          ...prev,
           status: "error",
-          error: error instanceof Error ? error.message : "Audit failed",
-        });
+          error: error instanceof Error ? error.message : "The audit failed.",
+        }));
       }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setIsRunning(false);
     }
-  }, [columns, docs, isRunning]);
+  }, [applyEvent, columns, connectors, docs, isRunning]);
 
   const phase: Phase = useMemo(() => {
     if (audit.status === "error") return "error";
     if (audit.status === "complete") return "complete";
-    if (audit.status === "running") return "auditing";
-    if (Object.values(extractions).some((e) => e.status === "extracting" || e.status === "queued"))
-      return "extracting";
-    return "configure";
-  }, [audit.status, extractions]);
+    if (audit.status !== "running") return "configure";
+    const running = agents.filter((agent) => agent.status === "running");
+    if (running.some((agent) => agent.type === "materiality-gate")) return "gating";
+    if (running.some((agent) => agent.type.endsWith("-auditor") || agent.type.endsWith("-reconciler")))
+      return "detecting";
+    if (running.some((agent) => agent.type === "lease-abstractor")) return "abstracting";
+    return audit.findings.length || audit.candidates.length ? "gating" : "abstracting";
+  }, [agents, audit.candidates.length, audit.findings.length, audit.status]);
 
-  /** Cells flagged by audit findings, as "leaseName::columnKey". */
+  /** Cells a published finding touches, as "leaseName::columnKey". */
   const flaggedCells = useMemo(() => {
     const flagged = new Map<string, Finding["severity"]>();
-    const rank = { info: 0, warning: 1, critical: 2 };
+    const byPath = new Map<string, string>();
+    for (const doc of docs) {
+      byPath.set(doc.name.toLowerCase(), doc.name);
+    }
+    const resolveLease = (label: string) => {
+      const base = label.split("/").pop()?.toLowerCase() ?? label.toLowerCase();
+      return (
+        byPath.get(label.toLowerCase()) ??
+        docs.find((doc) => {
+          const name = doc.name.toLowerCase();
+          return name === base || base.startsWith(name.replace(/\.[^.]+$/, ""));
+        })?.name ??
+        docs.find((doc) => base.includes(doc.name.toLowerCase().replace(/\.[^.]+$/, "")))
+          ?.name
+      );
+    };
+
     for (const finding of audit.findings) {
-      for (const lease of finding.leases) {
+      for (const rawLease of finding.leases) {
+        const lease = resolveLease(rawLease);
+        if (!lease) continue;
         for (const column of finding.columns) {
           const key = `${lease}::${columnKey(column)}`;
-          const existing = flagged.get(key);
-          if (!existing || rank[finding.severity] > rank[existing]) {
+          if (finding.severity === "critical" || !flagged.has(key)) {
             flagged.set(key, finding.severity);
           }
         }
       }
     }
     return flagged;
-  }, [audit.findings]);
+  }, [audit.findings, docs]);
 
   return {
     columns,
     docs,
+    connectors,
+    connectorCatalog: CONNECTORS,
     extractions,
+    agents,
+    leadNote,
     audit,
     phase,
     isRunning,
@@ -335,7 +443,10 @@ export function useAuditEngine() {
     addFiles,
     addDocs,
     removeDoc,
+    connectConnector,
+    disconnectConnector,
     reset,
+    stop,
     run,
   };
 }

@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Play, RotateCcw } from "lucide-react";
+import { Play, RotateCcw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConnectionsPanel } from "@/components/app/connections-panel";
 import { DocumentsPanel } from "@/components/app/documents-panel";
 import { ExtractionMatrix } from "@/components/app/extraction-matrix";
 import { FindingsPanel } from "@/components/app/findings-panel";
@@ -23,11 +24,11 @@ export default function Home() {
   const hasRun =
     engine.audit.status !== "idle" || Object.keys(engine.extractions).length > 0;
 
-  // Jump to findings the moment the audit stage begins streaming.
-  const [prevAuditStatus, setPrevAuditStatus] = useState(engine.audit.status);
-  if (engine.audit.status !== prevAuditStatus) {
-    setPrevAuditStatus(engine.audit.status);
-    if (engine.audit.status === "running") setTab("findings");
+  // Jump to findings the moment the materiality gate starts publishing.
+  const [prevPhase, setPrevPhase] = useState(engine.phase);
+  if (engine.phase !== prevPhase) {
+    setPrevPhase(engine.phase);
+    if (engine.phase === "gating") setTab("findings");
   }
 
   return (
@@ -56,6 +57,13 @@ export default function Home() {
               onAddDocs={engine.addDocs}
               onRemove={engine.removeDoc}
             />
+            <ConnectionsPanel
+              catalog={engine.connectorCatalog}
+              connectors={engine.connectors}
+              disabled={engine.isRunning}
+              onConnect={engine.connectConnector}
+              onDisconnect={engine.disconnectConnector}
+            />
           </div>
 
           <div className="flex flex-none flex-col gap-2 border-t bg-background/80 p-4">
@@ -66,18 +74,29 @@ export default function Home() {
             >
               <Play className="size-3.5" />
               {engine.isRunning
-                ? "Pipeline running…"
+                ? "Agents running…"
                 : `Run audit — ${engine.docs.length} docs × ${fieldCount} fields`}
             </Button>
-            {hasRun && !engine.isRunning && (
+            {engine.isRunning ? (
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={engine.reset}
-                className="h-7 rounded-sm font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground hover:text-foreground"
+                onClick={engine.stop}
+                className="h-7 rounded-sm font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground hover:text-critical"
               >
-                <RotateCcw className="size-3" /> Clear run
+                <Square className="size-3" /> Stop run
               </Button>
+            ) : (
+              hasRun && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={engine.reset}
+                  className="h-7 rounded-sm font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground hover:text-foreground"
+                >
+                  <RotateCcw className="size-3" /> Clear run
+                </Button>
+              )
             )}
           </div>
         </aside>
@@ -92,6 +111,7 @@ export default function Home() {
               docs={engine.docs}
               columns={engine.columns}
               extractions={engine.extractions}
+              agents={engine.agents}
               audit={engine.audit}
             />
           </div>
@@ -129,7 +149,17 @@ export default function Home() {
                   )}
                 </button>
               ))}
-              <div className="ml-auto pr-4">
+              <div className="ml-auto flex items-center gap-3 pr-4">
+                {engine.audit.dismissals.length > 0 && (
+                  <span className="microlabel text-[9px] text-muted-foreground/70">
+                    {engine.audit.dismissals.length} suppressed
+                  </span>
+                )}
+                {engine.audit.costUsd != null && (
+                  <span className="microlabel text-[9px] tabular-nums">
+                    ${engine.audit.costUsd.toFixed(2)}
+                  </span>
+                )}
                 <span className="microlabel text-[9px]">
                   {engine.docs.length} docs · {fieldCount} fields
                 </span>

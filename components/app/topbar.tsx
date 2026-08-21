@@ -6,8 +6,9 @@ import type { Phase } from "@/lib/types";
 
 const PHASE_LABEL: Record<Phase, { label: string; tone: string; pulse: boolean }> = {
   configure: { label: "Standing by", tone: "text-muted-foreground", pulse: false },
-  extracting: { label: "Extracting", tone: "text-primary", pulse: true },
-  auditing: { label: "Auditing", tone: "text-warn", pulse: true },
+  abstracting: { label: "Abstracting", tone: "text-primary", pulse: true },
+  detecting: { label: "Detectors running", tone: "text-primary", pulse: true },
+  gating: { label: "Materiality gate", tone: "text-warn", pulse: true },
   complete: { label: "Audit complete", tone: "text-ok", pulse: false },
   error: { label: "Fault", tone: "text-critical", pulse: false },
 };
@@ -44,7 +45,7 @@ export function Topbar({ phase }: { phase: Phase }) {
             OPEN LEASE AUDIT
           </span>
           <span className="microlabel hidden sm:inline">
-            Portfolio integrity console
+            Agent-run lease exposure review
           </span>
         </div>
       </div>
@@ -57,7 +58,7 @@ export function Topbar({ phase }: { phase: Phase }) {
           </span>
         </div>
         <div className="hidden h-4 w-px bg-border md:block" />
-        <span className="microlabel hidden md:inline">claude-sonnet-4-6</span>
+        <span className="microlabel hidden md:inline">Claude Agent SDK</span>
         <div className="hidden h-4 w-px bg-border md:block" />
         <UtcClock />
       </div>
