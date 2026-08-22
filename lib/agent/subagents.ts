@@ -2,7 +2,6 @@ import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { AUDIT_TOOLS } from "./tools";
 import { EVIDENCE_RULE, MATERIALITY_BAR } from "./doctrine";
 
-export const ABSTRACTOR = "lease-abstractor";
 export const GATE = "materiality-gate";
 
 /** Detector agents, in the order the console lays them out. */
@@ -70,7 +69,7 @@ Missing terms count when the rest of the document depends on them.`,
     label: "Critical dates",
     description:
       "Finds date and option defects: term arithmetic, renewal and termination notice windows, expirations, auto-renewals. Use for anything time-barred.",
-    beat: `You audit **what expires**. Today's date is in SCHEMA.md; measure
+    beat: `You audit **what expires**. Today's date is in PORTFOLIO.md; measure
 every window against it. Your beat:
 
 - Term arithmetic: commencement plus stated term that does not equal the stated
@@ -131,14 +130,10 @@ ${detector.beat}
 
 ## How you work
 
-1. Read \`SCHEMA.md\` first — it names the leases, the fields the owner cares
-   about, and today's date.
+1. Read \`PORTFOLIO.md\` first — it names the leases and today's date.
 2. Read every lease in \`leases/\` in full. Grep is for locating clauses, not for
    deciding: a defect you find by keyword still has to be read in context.
-3. Read \`abstracts/*.json\` for the fields already pulled from each lease. Treat
-   them as a map, not as truth — verify anything you rely on against the
-   document itself.
-4. For each defect that clears the bar below, call
+3. For each defect that clears the bar below, call
    \`${AUDIT_TOOLS.reportCandidate}\` once, with \`detector\` set to
    "${detector.name}".
 
@@ -156,10 +151,8 @@ substance goes through the tool.`;
 }
 
 export function buildAgents({
-  abstractorModel,
   connectorNames,
 }: {
-  abstractorModel?: string;
   connectorNames: string[];
 }): Record<string, AgentDefinition> {
   const connectorNote = connectorNames.length
@@ -185,39 +178,6 @@ can surface. Never write to a connected system; read only.`
   );
 
   return {
-    [ABSTRACTOR]: {
-      description:
-        "Abstracts the schema fields from exactly one lease document, with a verbatim quote behind every value. Dispatch one per lease.",
-      prompt: `You are a senior commercial lease abstraction analyst. You are assigned
-**one** lease document. Read it end to end and report the fields the portfolio
-owner asked for.
-
-## How you work
-
-1. Read \`SCHEMA.md\` — it lists the columns, their types, and the exact format
-   each value must take.
-2. Read your assigned lease in full before reporting anything. Do not skim to
-   the first match: commercial leases define a term in one section and modify it
-   in another, and the modification is what governs.
-3. Call \`${AUDIT_TOOLS.recordAbstract}\` exactly once, with an entry for every
-   column in SCHEMA.md.
-
-## What matters
-
-- **Never invent a value.** \`null\` is a correct answer and a useful one — a
-  missing term is a signal to the auditors who read your output.
-- Every non-null value carries a short verbatim quote. ${EVIDENCE_RULE}
-- When two clauses give different values for one field, report the one that
-  governs, quote it, mark confidence \`low\`, and say in the evidence that the
-  document contradicts itself. Do not silently pick one.
-- Match the format in SCHEMA.md exactly: dates as YYYY-MM-DD, money as a bare
-  number, booleans as true/false.
-
-Your final message is one line naming the lease you abstracted. All substance
-goes through the tool.`,
-      tools: ["Read", "Grep", AUDIT_TOOLS.recordAbstract],
-      ...(abstractorModel ? { model: abstractorModel } : {}),
-    },
     ...detectors,
     [GATE]: {
       description:
@@ -242,8 +202,8 @@ Your default answer is no.
      a defect.
 3. **Deduplicate.** Several detectors will report the same underlying problem
    from different angles. Publish it once, as the strongest version, listing
-   every lease and column involved and crediting the detector that framed it
-   best. Dismiss the rest as duplicates.
+   every lease involved and crediting the detector that framed it best.
+   Dismiss the rest as duplicates.
 4. Publish survivors with \`${AUDIT_TOOLS.publishFinding}\`, strongest first.
    Dismiss everything else with \`${AUDIT_TOOLS.dismissCandidate}\` — every
    candidate ends in exactly one of those two calls.

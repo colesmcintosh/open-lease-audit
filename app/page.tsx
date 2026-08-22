@@ -1,35 +1,20 @@
 "use client";
 
-import { useState } from "react";
 import { Play, RotateCcw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BudgetControl } from "@/components/app/budget-control";
 import { ConnectionsPanel } from "@/components/app/connections-panel";
 import { DocumentsPanel } from "@/components/app/documents-panel";
-import { ExtractionMatrix } from "@/components/app/extraction-matrix";
 import { FindingsPanel } from "@/components/app/findings-panel";
-import { SchemaBuilder } from "@/components/app/schema-builder";
 import { Topbar } from "@/components/app/topbar";
 import { WorkflowGraph } from "@/components/app/workflow-graph";
 import { useAuditEngine } from "@/hooks/use-audit-engine";
-import { cn } from "@/lib/utils";
-
-type Tab = "matrix" | "findings";
 
 export default function Home() {
   const engine = useAuditEngine();
-  const [tab, setTab] = useState<Tab>("matrix");
 
-  const fieldCount = engine.columns.filter((column) => column.name.trim()).length;
-  const canRun = engine.docs.length > 0 && fieldCount > 0 && !engine.isRunning;
-  const hasRun =
-    engine.audit.status !== "idle" || Object.keys(engine.extractions).length > 0;
-
-  // Jump to findings the moment the materiality gate starts publishing.
-  const [prevPhase, setPrevPhase] = useState(engine.phase);
-  if (engine.phase !== prevPhase) {
-    setPrevPhase(engine.phase);
-    if (engine.phase === "gating") setTab("findings");
-  }
+  const canRun = engine.docs.length > 0 && !engine.isRunning;
+  const hasRun = engine.audit.status !== "idle";
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
@@ -42,16 +27,8 @@ export default function Home() {
           style={{ animationDelay: "60ms" }}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-4">
-            <SchemaBuilder
-              columns={engine.columns}
-              disabled={engine.isRunning}
-              onAdd={engine.addColumn}
-              onUpdate={engine.updateColumn}
-              onRemove={engine.removeColumn}
-            />
             <DocumentsPanel
               docs={engine.docs}
-              extractions={engine.extractions}
               disabled={engine.isRunning}
               onAddFiles={engine.addFiles}
               onAddDocs={engine.addDocs}
@@ -66,7 +43,13 @@ export default function Home() {
             />
           </div>
 
-          <div className="flex flex-none flex-col gap-2 border-t bg-background/80 p-4">
+          <div className="flex flex-none flex-col gap-3 border-t bg-background/80 p-4">
+            <BudgetControl
+              budgetUsd={engine.budgetUsd}
+              leaseCount={engine.docs.length}
+              disabled={engine.isRunning}
+              onChange={engine.setBudgetUsd}
+            />
             <Button
               disabled={!canRun}
               onClick={() => void engine.run()}
@@ -75,7 +58,7 @@ export default function Home() {
               <Play className="size-3.5" />
               {engine.isRunning
                 ? "Agents running…"
-                : `Run audit — ${engine.docs.length} docs × ${fieldCount} fields`}
+                : `Run audit — ${engine.docs.length} ${engine.docs.length === 1 ? "lease" : "leases"}`}
             </Button>
             {engine.isRunning ? (
               <Button
@@ -109,8 +92,6 @@ export default function Home() {
           >
             <WorkflowGraph
               docs={engine.docs}
-              columns={engine.columns}
-              extractions={engine.extractions}
               agents={engine.agents}
               audit={engine.audit}
             />
@@ -120,36 +101,16 @@ export default function Home() {
             className="reveal flex min-h-0 flex-1 flex-col"
             style={{ animationDelay: "180ms" }}
           >
-            <div className="flex flex-none items-center gap-0 border-b bg-background/60">
-              {(
-                [
-                  { id: "matrix", label: "Extraction matrix" },
-                  { id: "findings", label: "Findings" },
-                ] as const
-              ).map(({ id, label }) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setTab(id)}
-                  className={cn(
-                    "relative flex items-center gap-2 px-4 py-2.5 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors",
-                    tab === id
-                      ? "text-foreground"
-                      : "text-muted-foreground hover:text-foreground/80"
-                  )}
-                >
-                  {label}
-                  {id === "findings" && engine.audit.findings.length > 0 && (
-                    <span className="rounded-xs bg-critical/20 px-1.5 font-mono text-[9px] tabular-nums text-critical">
-                      {engine.audit.findings.length}
-                    </span>
-                  )}
-                  {tab === id && (
-                    <span className="absolute inset-x-0 -bottom-px h-px bg-primary" />
-                  )}
-                </button>
-              ))}
-              <div className="ml-auto flex items-center gap-3 pr-4">
+            <div className="flex flex-none items-center gap-2 border-b bg-background/60 px-4 py-2.5">
+              <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-foreground">
+                Findings
+              </span>
+              {engine.audit.findings.length > 0 && (
+                <span className="rounded-xs bg-critical/20 px-1.5 font-mono text-[9px] tabular-nums text-critical">
+                  {engine.audit.findings.length}
+                </span>
+              )}
+              <div className="ml-auto flex items-center gap-3">
                 {engine.audit.dismissals.length > 0 && (
                   <span className="microlabel text-[9px] text-muted-foreground/70">
                     {engine.audit.dismissals.length} suppressed
@@ -161,22 +122,13 @@ export default function Home() {
                   </span>
                 )}
                 <span className="microlabel text-[9px]">
-                  {engine.docs.length} docs · {fieldCount} fields
+                  {engine.docs.length} {engine.docs.length === 1 ? "lease" : "leases"}
                 </span>
               </div>
             </div>
 
             <div className="min-h-0 flex-1">
-              {tab === "matrix" ? (
-                <ExtractionMatrix
-                  docs={engine.docs}
-                  columns={engine.columns}
-                  extractions={engine.extractions}
-                  flaggedCells={engine.flaggedCells}
-                />
-              ) : (
-                <FindingsPanel audit={engine.audit} />
-              )}
+              <FindingsPanel audit={engine.audit} />
             </div>
           </div>
         </section>

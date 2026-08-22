@@ -4,15 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { FileText, FlaskConical, Loader2, UploadCloud, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { DocStatus, ExtractionState, LeaseDoc } from "@/lib/types";
-
-const STATUS_TONE: Record<DocStatus, string> = {
-  idle: "text-muted-foreground/60",
-  queued: "text-muted-foreground",
-  extracting: "text-primary",
-  extracted: "text-ok",
-  error: "text-critical",
-};
+import type { LeaseDoc } from "@/lib/types";
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -28,7 +20,6 @@ const SAMPLE_FILES = [
 
 interface DocumentsPanelProps {
   docs: LeaseDoc[];
-  extractions: Record<string, ExtractionState>;
   disabled: boolean;
   onAddFiles: (files: Iterable<File>) => Promise<void>;
   onAddDocs: (docs: LeaseDoc[]) => void;
@@ -37,7 +28,6 @@ interface DocumentsPanelProps {
 
 export function DocumentsPanel({
   docs,
-  extractions,
   disabled,
   onAddFiles,
   onAddDocs,
@@ -144,32 +134,27 @@ export function DocumentsPanel({
 
       {docs.length > 0 && (
         <ul className="flex flex-col divide-y border bg-card/50">
-          {docs.map((doc) => {
-            const state = extractions[doc.id];
-            const status: DocStatus = state?.status ?? "idle";
-            return (
-              <li key={doc.id} className="group flex items-center gap-2 px-2.5 py-2">
-                <span className={cn("status-dot", STATUS_TONE[status], status === "extracting" && "animate-status-pulse")} />
-                <FileText className="size-3.5 flex-none text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={doc.name}>
-                  {doc.name}
-                </span>
-                <span className="font-mono text-[10px] tabular-nums text-muted-foreground/70">
-                  {formatBytes(doc.size)}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  disabled={disabled}
-                  onClick={() => onRemove(doc.id)}
-                  className="size-5 flex-none rounded-sm text-muted-foreground opacity-0 transition-opacity hover:text-critical group-hover:opacity-100"
-                  aria-label={`Remove ${doc.name}`}
-                >
-                  <X className="size-3" />
-                </Button>
-              </li>
-            );
-          })}
+          {docs.map((doc) => (
+            <li key={doc.id} className="group flex items-center gap-2 px-2.5 py-2">
+              <FileText className="size-3.5 flex-none text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={doc.name}>
+                {doc.name}
+              </span>
+              <span className="font-mono text-[10px] tabular-nums text-muted-foreground/70">
+                {formatBytes(doc.size)}
+              </span>
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={disabled}
+                onClick={() => onRemove(doc.id)}
+                className="size-5 flex-none rounded-sm text-muted-foreground opacity-0 transition-opacity hover:text-critical group-hover:opacity-100"
+                aria-label={`Remove ${doc.name}`}
+              >
+                <X className="size-3" />
+              </Button>
+            </li>
+          ))}
         </ul>
       )}
     </section>

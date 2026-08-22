@@ -2,8 +2,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { coerceConfidence, coerceValue, columnKey, findColumn } from "@/lib/columns";
-import type { CellValue, ColumnDef, ExposureKind, FindingSeverity } from "@/lib/types";
+import type { ExposureKind, FindingSeverity } from "@/lib/types";
 import type { EventBus } from "./bus";
 import type { Workspace } from "./workspace";
 
@@ -11,7 +10,6 @@ export const AUDIT_SERVER = "audit";
 
 /** Fully-qualified names, for allowlisting and per-agent tool grants. */
 export const AUDIT_TOOLS = {
-  recordAbstract: `mcp__${AUDIT_SERVER}__record_abstract`,
   reportCandidate: `mcp__${AUDIT_SERVER}__report_candidate`,
   publishFinding: `mcp__${AUDIT_SERVER}__publish_finding`,
   dismissCandidate: `mcp__${AUDIT_SERVER}__dismiss_candidate`,
@@ -40,99 +38,13 @@ function nextId(prefix: string, counter: { n: number }) {
  */
 export function createAuditTools({
   workspace,
-  columns,
   bus,
 }: {
   workspace: Workspace;
-  columns: ColumnDef[];
   bus: EventBus;
 }) {
   const candidateCounter = { n: 0 };
   const findingCounter = { n: 0 };
-
-  const resolveLease = (label: string) => {
-    const needle = label.trim().toLowerCase();
-    const base = path.basename(needle);
-    return workspace.leases.find((lease) => {
-      const rel = lease.relPath.toLowerCase();
-      return (
-        rel === needle ||
-        path.basename(rel) === base ||
-        lease.doc.name.toLowerCase() === needle ||
-        lease.doc.name.toLowerCase() === base
-      );
-    });
-  };
-
-  const recordAbstract = tool(
-    "record_abstract",
-    "Report the abstracted schema fields for exactly one lease. Call this once, after reading the whole document. Every non-null value must carry a verbatim supporting quote.",
-    {
-      lease: z
-        .string()
-        .describe("Lease file path as listed in SCHEMA.md, e.g. leases/hq-suite-400.txt"),
-      fields: z
-        .array(
-          z.object({
-            column: z.string().describe("Exact column name from SCHEMA.md."),
-            value: z
-              .string()
-              .nullable()
-              .describe(
-                "The value as written in the lease, formatted per the column's Format column. null if the lease does not specify it."
-              ),
-            evidence: z
-              .string()
-              .nullable()
-              .describe("Short verbatim quote supporting the value, or null."),
-            confidence: z
-              .enum(["high", "medium", "low"])
-              .nullable()
-              .describe("high = stated explicitly, medium = derived, low = ambiguous."),
-          })
-        )
-        .describe("One entry per column in SCHEMA.md. Do not omit columns."),
-    },
-    async ({ lease, fields }) => {
-      const match = resolveLease(lease);
-      if (!match) {
-        return ok(
-          `No lease named "${lease}". Known leases: ${workspace.leases
-            .map((entry) => entry.relPath)
-            .join(", ")}`
-        );
-      }
-
-      const record: Record<string, CellValue> = {};
-      const unknown: string[] = [];
-      for (const field of fields) {
-        const column = findColumn(columns, field.column);
-        if (!column) {
-          unknown.push(field.column);
-          continue;
-        }
-        record[columnKey(column.name)] = {
-          value: coerceValue(field.value, column.type),
-          evidence: field.evidence?.trim() || null,
-          confidence: coerceConfidence(field.confidence),
-        };
-      }
-
-      bus.push({ type: "abstract", leaseId: match.doc.id, fields: record });
-      await writeFile(
-        path.join(workspace.abstractsDir, `${path.basename(match.relPath)}.json`),
-        JSON.stringify({ lease: match.relPath, fields: record }, null, 2),
-        "utf8"
-      );
-
-      const recorded = Object.keys(record).length;
-      return ok(
-        unknown.length
-          ? `Recorded ${recorded} field(s) for ${match.relPath}. Ignored unknown columns: ${unknown.join(", ")}. Use the exact names from SCHEMA.md.`
-          : `Recorded ${recorded} field(s) for ${match.relPath}.`
-      );
-    }
-  );
 
   const reportCandidate = tool(
     "report_candidate",
@@ -141,9 +53,6 @@ export function createAuditTools({
       detector: z.string().describe("Your own agent name, e.g. rent-and-charges-auditor."),
       title: z.string().describe("Short headline naming the defect, not the topic."),
       leases: z.array(z.string()).describe("Exact lease file paths involved."),
-      columns: z
-        .array(z.string())
-        .describe("Exact schema column names involved, empty if none apply."),
       detail: z
         .string()
         .describe("What is wrong, citing the specific values and clauses that conflict."),
@@ -198,7 +107,6 @@ export function createAuditTools({
         .nullable()
         .describe("Best-effort dollar exposure, or null if it cannot be bounded."),
       leases: z.array(z.string()).describe("Exact lease file paths involved."),
-      columns: z.array(z.string()).describe("Exact schema column names involved."),
       detail: z
         .string()
         .describe("What is wrong and why it costs money or invites litigation."),
@@ -221,7 +129,6 @@ export function createAuditTools({
           exposure: input.exposure as ExposureKind,
           exposureUsd: input.estimatedExposureUsd,
           leases: input.leases,
-          columns: input.columns,
           detail: input.detail,
           evidence: input.evidence,
           recommendation: input.recommendation,
@@ -281,7 +188,6 @@ export function createAuditTools({
       "Structured reporting channel for the lease audit. Findings only reach the user through these tools.",
     alwaysLoad: true,
     tools: [
-      recordAbstract,
       reportCandidate,
       publishFinding,
       dismissCandidate,

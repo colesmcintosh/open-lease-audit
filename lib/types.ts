@@ -1,23 +1,3 @@
-export type ColumnType = "text" | "number" | "currency" | "date" | "boolean";
-
-export interface ColumnDef {
-  id: string;
-  name: string;
-  description: string;
-  type: ColumnType;
-}
-
-export type Confidence = "high" | "medium" | "low";
-
-export interface CellValue {
-  value: string | number | boolean | null;
-  evidence: string | null;
-  confidence: Confidence | null;
-}
-
-/** Abstracted fields for one lease, keyed by columnKey(column.name). */
-export type ExtractionRecord = Record<string, CellValue | undefined>;
-
 export interface LeaseDoc {
   id: string;
   name: string;
@@ -25,14 +5,6 @@ export interface LeaseDoc {
   kind: "pdf" | "text";
   /** Base64 for PDFs, raw text otherwise. */
   data: string;
-}
-
-export type DocStatus = "idle" | "queued" | "extracting" | "extracted" | "error";
-
-export interface ExtractionState {
-  status: DocStatus;
-  record: ExtractionRecord;
-  error?: string;
 }
 
 /**
@@ -55,7 +27,6 @@ export interface Finding {
   /** Best-effort dollar exposure, null when the auditor could not bound it. */
   exposureUsd: number | null;
   leases: string[];
-  columns: string[];
   detail: string;
   /** Verbatim clauses the finding rests on, each attributed to a lease. */
   evidence: string[];
@@ -93,8 +64,6 @@ export interface AgentRun {
   /** Most recent tool call, rendered as a one-line trace. */
   activity: string;
   toolCalls: number;
-  /** Set on abstractors, linking the agent to the lease it was given. */
-  leaseId?: string;
 }
 
 export type AuditStatus = "idle" | "running" | "complete" | "error";
@@ -111,10 +80,4 @@ export interface AuditState {
   error?: string;
 }
 
-export type Phase =
-  | "configure"
-  | "abstracting"
-  | "detecting"
-  | "gating"
-  | "complete"
-  | "error";
+export type Phase = "configure" | "detecting" | "gating" | "complete" | "error";

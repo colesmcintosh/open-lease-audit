@@ -1,16 +1,16 @@
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import type { AuditEvent } from "@/lib/audit-events";
+import { clampBudget, DEFAULT_BUDGET_USD } from "@/lib/budget";
 import { connectorName, type ConnectorConfig } from "@/lib/connectors";
 import { describeRunError } from "@/lib/credentials";
-import type { ColumnDef, LeaseDoc } from "@/lib/types";
+import type { LeaseDoc } from "@/lib/types";
 import { EventBus } from "./bus";
 import { MATERIALITY_BAR } from "./doctrine";
-import { ABSTRACTOR, DETECTORS, GATE, buildAgents } from "./subagents";
+import { DETECTORS, GATE, buildAgents } from "./subagents";
 import { AUDIT_TOOLS, createAuditTools } from "./tools";
 import { createWorkspace, type Workspace } from "./workspace";
 
 const DEFAULT_MODEL = "claude-opus-5";
-const DEFAULT_MAX_BUDGET_USD = 8;
 
 /** Read-only file tools plus subagent dispatch. Nothing here can mutate. */
 const LEAD_TOOLS = ["Read", "Grep", "Glob", "Agent", "Task", AUDIT_TOOLS.publishSummary];
@@ -57,21 +57,17 @@ ${roster}
 Run these stages in order. Each stage needs the previous stage's results, so
 wait for every subagent in a stage to report before starting the next.
 
-**Stage 1 — abstract.** Read \`SCHEMA.md\`. Dispatch one \`${ABSTRACTOR}\` per
-lease, all in a single message so they run concurrently. Give each one the exact
-file path of its lease and nothing else to do. Wait for all of them.
-
-**Stage 2 — detect.** Dispatch all four detectors in a single message so they
+**Stage 1 — detect.** Dispatch all four detectors in a single message so they
 run concurrently:
 ${DETECTORS.map((detector) => `- \`${detector.name}\` — ${detector.label.toLowerCase()}`).join("\n")}
 
-Tell each to read \`SCHEMA.md\`, every lease in \`leases/\`, and \`abstracts/\`.
-Wait for all of them.
+Tell each to read \`PORTFOLIO.md\` and every lease in \`leases/\` in full. Wait
+for all of them.
 
-**Stage 3 — gate.** Dispatch \`${GATE}\` once. It reads \`candidates/\`, verifies
+**Stage 2 — gate.** Dispatch \`${GATE}\` once. It reads \`candidates/\`, verifies
 each one against the source documents, and publishes only what survives.
 
-**Stage 4 — close.** Call \`${AUDIT_TOOLS.publishSummary}\` exactly once with
+**Stage 3 — close.** Call \`${AUDIT_TOOLS.publishSummary}\` exactly once with
 the portfolio verdict. Read the gate's report for the counts; do not re-litigate
 its decisions.
 ${
@@ -135,8 +131,9 @@ function truncate(text: string, max = 240): string {
 
 export interface AuditRunInput {
   docs: LeaseDoc[];
-  columns: ColumnDef[];
   connectors: ConnectorConfig[];
+  /** Hard spend ceiling for this run, in USD. */
+  budgetUsd?: number;
   signal?: AbortSignal;
 }
 
@@ -146,13 +143,13 @@ export interface AuditRunInput {
  */
 export async function* runAudit({
   docs,
-  columns,
   connectors,
+  budgetUsd,
   signal,
 }: AuditRunInput): AsyncGenerator<AuditEvent> {
   const startedAt = Date.now();
   const today = new Date().toISOString().slice(0, 10);
-  const workspace = await createWorkspace({ docs, columns, today });
+  const workspace = await createWorkspace({ docs, today });
   const bus = new EventBus();
 
   const controller = new AbortController();
@@ -180,12 +177,9 @@ export async function* runAudit({
     cwd: workspace.root,
     model: process.env.OPEN_LEASE_AUDIT_MODEL || DEFAULT_MODEL,
     systemPrompt: SYSTEM_PROMPT,
-    agents: buildAgents({
-      abstractorModel: process.env.OPEN_LEASE_AUDIT_ABSTRACTOR_MODEL || undefined,
-      connectorNames: connectorIds,
-    }),
+    agents: buildAgents({ connectorNames: connectorIds }),
     mcpServers: {
-      audit: createAuditTools({ workspace, columns, bus }),
+      audit: createAuditTools({ workspace, bus }),
       ...connectorServers,
     },
     allowedTools: [
@@ -210,9 +204,12 @@ export async function* runAudit({
       CLAUDE_AUTO_BACKGROUND_TASKS: "0",
       // Two levels deep by design; subagents never spawn their own.
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
-      CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: String(Math.max(8, docs.length + 4)),
+      CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: String(DETECTORS.length + 1),
     },
-    maxBudgetUsd: Number(process.env.OPEN_LEASE_AUDIT_MAX_BUDGET_USD) || DEFAULT_MAX_BUDGET_USD,
+    maxBudgetUsd: clampBudget(
+      budgetUsd,
+      clampBudget(Number(process.env.OPEN_LEASE_AUDIT_MAX_BUDGET_USD), DEFAULT_BUDGET_USD)
+    ),
     settingSources: [],
     permissionMode: "default",
     abortController: controller,
@@ -258,22 +255,7 @@ export async function* runAudit({
               const label =
                 firstString(block.input, ["description"]) ?? agent;
               agents.set(block.id, agent);
-              const haystack = `${label} ${firstString(block.input, ["prompt"]) ?? ""}`;
-              const lease =
-                agent === ABSTRACTOR
-                  ? workspace.leases.find(
-                      (entry) =>
-                        haystack.includes(entry.relPath) ||
-                        haystack.includes(entry.doc.name)
-                    )
-                  : undefined;
-              bus.push({
-                type: "agent_started",
-                id: block.id,
-                agent,
-                label,
-                ...(lease ? { leaseId: lease.doc.id } : {}),
-              });
+              bus.push({ type: "agent_started", id: block.id, agent, label });
               continue;
             }
 
@@ -324,7 +306,7 @@ export async function* runAudit({
               type: "error",
               message:
                 message.subtype === "error_max_budget_usd"
-                  ? "The audit stopped at its spend limit. Raise OPEN_LEASE_AUDIT_MAX_BUDGET_USD or audit fewer leases at once."
+                  ? "The audit stopped at its spend limit before the gate could publish. Raise the run budget or audit fewer leases at once."
                   : `The audit ended early (${message.subtype}).`,
             });
           }

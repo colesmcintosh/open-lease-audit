@@ -6,7 +6,6 @@ import type { Phase } from "@/lib/types";
 
 const PHASE_LABEL: Record<Phase, { label: string; tone: string; pulse: boolean }> = {
   configure: { label: "Standing by", tone: "text-muted-foreground", pulse: false },
-  abstracting: { label: "Abstracting", tone: "text-primary", pulse: true },
   detecting: { label: "Detectors running", tone: "text-primary", pulse: true },
   gating: { label: "Materiality gate", tone: "text-warn", pulse: true },
   complete: { label: "Audit complete", tone: "text-ok", pulse: false },

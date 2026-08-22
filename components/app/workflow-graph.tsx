@@ -19,16 +19,8 @@ import {
   NodeTitle,
 } from "@/components/ai-elements/node";
 import { Panel } from "@/components/ai-elements/panel";
-import { columnKey } from "@/lib/columns";
 import { cn } from "@/lib/utils";
-import type {
-  AgentRun,
-  AgentStatus,
-  AuditState,
-  ColumnDef,
-  ExtractionState,
-  LeaseDoc,
-} from "@/lib/types";
+import type { AgentRun, AgentStatus, AuditState, LeaseDoc } from "@/lib/types";
 
 /** Mirrors lib/agent/subagents.ts — the roster is fixed, so the console can
  *  render the whole constellation before a single agent has started. */
@@ -93,47 +85,36 @@ function AgentNode({ data }: FlowNodeProps) {
 
 interface DocNodeData {
   name: string;
-  status: AgentStatus;
-  activity: string;
-  filled: number;
-  total: number;
+  size: string;
+  /** Reflects the detector stage, since no agent owns a single lease. */
+  isBeingRead: boolean;
   [key: string]: unknown;
 }
 
 function DocNode({ data }: FlowNodeProps) {
   const node = data as DocNodeData;
-  const ratio = node.total ? node.filled / node.total : 0;
   return (
     <Node
       handles={{ target: true, source: true }}
       className={cn(
         "w-56 rounded-sm border-border/80 bg-card/95 transition-colors duration-300",
-        node.status === "running" && "border-primary/60",
-        node.status === "error" && "border-critical/60"
+        node.isBeingRead && "border-primary/60"
       )}
     >
-      <NodeContent className="flex flex-col gap-1.5 px-3 py-2">
-        <div className="flex items-center gap-2">
-          <span className={cn("status-dot", TONE_CLASS[node.status])} />
-          <span className="min-w-0 flex-1 truncate font-mono text-[10px]" title={node.name}>
-            {node.name}
-          </span>
-          <span className="font-mono text-[9px] tabular-nums text-muted-foreground">
-            {node.filled}/{node.total}
-          </span>
-        </div>
-        <div className="h-0.5 w-full overflow-hidden bg-border">
-          <div
-            className={cn(
-              "h-full transition-[width] duration-500 ease-out",
-              node.status === "error" ? "bg-critical" : "bg-primary",
-              node.status === "running" && "stream-shimmer"
-            )}
-            style={{ width: `${Math.round(ratio * 100)}%` }}
-          />
-        </div>
-        <span className="truncate font-mono text-[9px] text-muted-foreground/70" title={node.activity}>
-          {node.activity}
+      <NodeContent className="flex items-center gap-2 px-3 py-2">
+        <span
+          className={cn(
+            "status-dot",
+            node.isBeingRead
+              ? "text-primary animate-status-pulse"
+              : "text-muted-foreground/50"
+          )}
+        />
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px]" title={node.name}>
+          {node.name}
+        </span>
+        <span className="font-mono text-[9px] tabular-nums text-muted-foreground">
+          {node.size}
         </span>
       </NodeContent>
     </Node>
@@ -234,10 +215,14 @@ const COL_X = [0, 300, 620, 940, 1240];
 
 interface GraphInputs {
   docs: LeaseDoc[];
-  activeColumns: ColumnDef[];
-  extractions: Record<string, ExtractionState>;
   agents: AgentRun[];
   audit: AuditState;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}K`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
 }
 
 function edgeState(status: AgentStatus): EdgeState {
@@ -250,27 +235,17 @@ function edgeState(status: AgentStatus): EdgeState {
  * roster; every tone, metric, and edge state comes from live run state, so a
  * data update never moves a node the user has dragged.
  */
-function computeGraph({ docs, activeColumns, extractions, agents, audit }: GraphInputs) {
-  const keys = activeColumns.map((column) => columnKey(column.name));
+function computeGraph({ docs, agents, audit }: GraphInputs) {
   const byType = new Map<string, AgentRun>();
-  for (const agent of agents) {
-    if (agent.type !== "lease-abstractor") byType.set(agent.type, agent);
-  }
-  const abstractorFor = (docId: string) =>
-    agents.find((agent) => agent.type === "lease-abstractor" && agent.leaseId === docId);
+  for (const agent of agents) byType.set(agent.type, agent);
 
   const lead = agents.find((agent) => agent.id === "lead");
   const gate = byType.get(GATE);
+  const detectorsRunning = DETECTORS.some(
+    (detector) => byType.get(detector.type)?.status === "running"
+  );
   const rows = Math.max(docs.length, DETECTORS.length, 1);
   const centerY = ((rows - 1) * ROW_SPACING) / 2;
-
-  const docStatus = (docId: string): AgentStatus => {
-    const state = extractions[docId];
-    if (state?.status === "extracted") return "done";
-    if (state?.status === "error") return "error";
-    if (state?.status === "extracting") return "running";
-    return abstractorFor(docId)?.status ?? "pending";
-  };
 
   const nodes: FlowNode[] = [
     {
@@ -282,39 +257,33 @@ function computeGraph({ docs, activeColumns, extractions, agents, audit }: Graph
         title: "LEAD AUDITOR",
         description: lead?.activity || "Awaiting a portfolio",
         status: lead?.status ?? "pending",
-        metric: `${activeColumns.length} FIELDS · ${docs.length} DOCS`,
+        metric: `${docs.length} ${docs.length === 1 ? "LEASE" : "LEASES"}`,
         isHead: true,
       } satisfies AgentNodeData,
     },
     ...(docs.length
-      ? docs.map((doc, index) => {
-          const status = docStatus(doc.id);
-          const agent = abstractorFor(doc.id);
-          const filled = keys.filter(
-            (key) => extractions[doc.id]?.record[key]?.value !== undefined
-          ).length;
-          return {
-            id: `doc-${doc.id}`,
-            type: "doc",
-            position: { x: COL_X[1], y: index * ROW_SPACING },
-            data: {
-              name: doc.name,
-              status,
-              activity: agent?.activity ?? "lease-abstractor",
-              filled,
-              total: keys.length,
-            } satisfies DocNodeData,
-          } as FlowNode;
-        })
+      ? docs.map(
+          (doc, index) =>
+            ({
+              id: `doc-${doc.id}`,
+              type: "doc",
+              position: { x: COL_X[1], y: index * ROW_SPACING },
+              data: {
+                name: doc.name,
+                size: formatBytes(doc.size),
+                isBeingRead: detectorsRunning,
+              } satisfies DocNodeData,
+            }) as FlowNode
+        )
       : [
           {
             id: "intake",
             type: "agent",
             position: { x: COL_X[1], y: centerY - 40 },
             data: {
-              label: "STAGE 01",
-              title: "ABSTRACTORS",
-              description: "One agent per lease, dispatched in parallel",
+              label: "INTAKE",
+              title: "PORTFOLIO",
+              description: "Upload the leases every detector will read",
               status: "pending",
             } satisfies AgentNodeData,
           } as FlowNode,
@@ -374,40 +343,26 @@ function computeGraph({ docs, activeColumns, extractions, agents, audit }: Graph
     },
   ];
 
-  const detectorsRunning = DETECTORS.some(
-    (detector) => byType.get(detector.type)?.status === "running"
-  );
-
   const edges: FlowEdge[] = [
     ...(docs.length
-      ? docs.flatMap((doc) => {
-          const status = docStatus(doc.id);
-          return [
-            {
-              id: `lead-${doc.id}`,
-              source: "lead",
-              target: `doc-${doc.id}`,
-              type: "pipeline",
-              data: { state: edgeState(status) } satisfies PipelineEdgeData,
-            },
-            ...DETECTORS.map((detector) => ({
-              id: `${doc.id}-${detector.type}`,
-              source: `doc-${doc.id}`,
-              target: detector.type,
-              type: "pipeline",
-              data: {
-                state:
-                  status !== "done"
-                    ? ("idle" as EdgeState)
-                    : detectorsRunning
-                      ? ("active" as EdgeState)
-                      : byType.get(detector.type)?.status === "done"
-                        ? ("done" as EdgeState)
-                        : ("idle" as EdgeState),
-              } satisfies PipelineEdgeData,
-            })),
-          ];
-        })
+      ? docs.flatMap((doc) => [
+          {
+            id: `lead-${doc.id}`,
+            source: "lead",
+            target: `doc-${doc.id}`,
+            type: "pipeline",
+            data: { state: edgeState(lead?.status ?? "pending") } satisfies PipelineEdgeData,
+          },
+          ...DETECTORS.map((detector) => ({
+            id: `${doc.id}-${detector.type}`,
+            source: `doc-${doc.id}`,
+            target: detector.type,
+            type: "pipeline",
+            data: {
+              state: edgeState(byType.get(detector.type)?.status ?? "pending"),
+            } satisfies PipelineEdgeData,
+          })),
+        ])
       : [
           {
             id: "lead-intake",
@@ -452,31 +407,18 @@ function computeGraph({ docs, activeColumns, extractions, agents, audit }: Graph
 
 interface WorkflowGraphProps {
   docs: LeaseDoc[];
-  columns: ColumnDef[];
-  extractions: Record<string, ExtractionState>;
   agents: AgentRun[];
   audit: AuditState;
 }
 
-export function WorkflowGraph({
-  docs,
-  columns,
-  extractions,
-  agents,
-  audit,
-}: WorkflowGraphProps) {
+export function WorkflowGraph({ docs, agents, audit }: WorkflowGraphProps) {
   const instanceRef = useRef<ReactFlowInstance | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
 
-  const activeColumns = useMemo(
-    () => columns.filter((column) => column.name.trim()),
-    [columns]
-  );
-
   const graph = useMemo(
-    () => computeGraph({ docs, activeColumns, extractions, agents, audit }),
-    [docs, activeColumns, extractions, agents, audit]
+    () => computeGraph({ docs, agents, audit }),
+    [docs, agents, audit]
   );
 
   const structureKey = docs.map((doc) => doc.id).join("|");

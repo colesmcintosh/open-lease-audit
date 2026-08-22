@@ -34,47 +34,44 @@ and the console tells you how many were withheld.
 ## How it works
 
 Built on the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk). One
-`query()` drives a lead auditor that dispatches subagents through four stages:
+`query()` drives a lead auditor that dispatches subagents through three stages:
 
 ```
-                     ┌── lease-abstractor ──┐
-  SCHEMA.md ─────────┼── lease-abstractor ──┼── abstracts/*.json
-  (your columns)     └── lease-abstractor ──┘        │
-                                                     ▼
                      ┌── rent-and-charges-auditor ───┐
-                     ├── liability-and-covenant-…  ──┼── candidates/*.json
-                     ├── critical-date-auditor  ─────┤
-                     └── portfolio-reconciler ───────┘
-                                                     │
-                                                     ▼
-                                          materiality-gate
-                                     (re-reads every quote, tries
-                                      to refute, dedupes, ranks)
-                                                     │
-                                                     ▼
-                                     published findings + verdict
+  leases/ ───────────┼── liability-and-covenant-…  ──┼── candidates/*.json
+  PORTFOLIO.md       ├── critical-date-auditor  ─────┤        │
+                     └── portfolio-reconciler ───────┘        │
+                                                              ▼
+                                                   materiality-gate
+                                              (re-reads every quote, tries
+                                               to refute, dedupes, ranks)
+                                                              │
+                                                              ▼
+                                              published findings + verdict
 ```
 
-1. **Abstract** — one agent per lease, in parallel. Reads the whole document and
-   reports your schema fields, each with a verbatim supporting quote.
-2. **Detect** — four specialists sweep the portfolio concurrently, each with its
+There is no extraction schema and no field-by-field abstraction pass. The
+detectors read the leases themselves, in full, and the only thing that comes out
+of the pipeline is findings.
+
+1. **Detect** — four specialists sweep the portfolio concurrently, each with its
    own beat and its own instructions on what its beat's expensive failures look
    like. They file *candidates*, which are never shown to you.
-3. **Gate** — one adversarial reviewer. Its default answer is no. It opens each
+2. **Gate** — one adversarial reviewer. Its default answer is no. It opens each
    named lease, finds the quote, checks whether the loss actually follows,
    checks whether a later clause cures it, deduplicates across detectors, and
    publishes only survivors.
-4. **Close** — the lead publishes the portfolio verdict.
+3. **Close** — the lead publishes the portfolio verdict.
 
 ### Design notes
 
 - **The workspace is shared memory.** Uploaded leases are written to a temp
-  directory the agents read with their own file tools. Each stage writes its
-  output back (`abstracts/`, `candidates/`), so the next stage reads it off disk
-  instead of through the orchestrator's context window. The orchestrator stays
-  small no matter how large the portfolio is.
+  directory the agents read with their own file tools. The detectors write their
+  candidates back into it, so the gate reads them off disk instead of through the
+  orchestrator's context window. The orchestrator stays small no matter how large
+  the portfolio is.
 - **Structured output only.** Findings reach the UI exclusively through
-  in-process MCP tools (`record_abstract`, `report_candidate`, `publish_finding`,
+  in-process MCP tools (`report_candidate`, `publish_finding`,
   `dismiss_candidate`, `publish_summary`). Prose an agent writes is never parsed,
   so a finding that was not published does not exist.
 - **Read-only sandbox.** Agents get `Read`, `Grep`, `Glob`, the audit tools, and
@@ -83,10 +80,13 @@ Built on the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk). One
   embedded in an uploaded lease cannot widen the sandbox.
 - **Deterministic staging.** Background subagent dispatch is disabled, so each
   stage completes before the next begins and no tool call lands after the run.
-- **Bounded spend.** Every run carries a hard `maxBudgetUsd` ceiling.
+- **Bounded spend.** Every run carries a hard `maxBudgetUsd` ceiling, set from the
+  console's run-budget control and clamped server-side. The agents stop the moment
+  they reach it, so the control warns when the ceiling is below what a portfolio
+  of that size usually needs — a run that stops short publishes nothing.
 
 The console streams the run as NDJSON: agent starts and finishes, each tool call,
-every abstracted cell, every candidate, and every gate ruling.
+every candidate, and every gate ruling.
 
 ## Quick start
 
@@ -128,22 +128,22 @@ are never persisted. The agents get read access only — nothing is written back
 | --- | --- |
 | `ANTHROPIC_API_KEY` | API key for the Agent SDK. Not needed if the host has a Claude Code login. |
 | `OPEN_LEASE_AUDIT_MODEL` | Model for the lead, detectors, and gate (default `claude-opus-5`) |
-| `OPEN_LEASE_AUDIT_ABSTRACTOR_MODEL` | Model for the per-lease abstractors (default: inherit) |
-| `OPEN_LEASE_AUDIT_MAX_BUDGET_USD` | Hard spend ceiling per run (default `8`) |
+| `OPEN_LEASE_AUDIT_MAX_BUDGET_USD` | Default spend ceiling per run (default `8`), overridden by the console's budget control |
 
 ## Architecture
 
 | Path | Role |
 | --- | --- |
 | `lib/agent/run.ts` | Drives `query()`, maps SDK messages to console events |
-| `lib/agent/subagents.ts` | Agent roster: abstractor, four detectors, materiality gate |
+| `lib/agent/subagents.ts` | Agent roster: four detectors and the materiality gate |
 | `lib/agent/doctrine.ts` | The materiality bar, injected into every detector and the gate |
 | `lib/agent/tools.ts` | In-process MCP server — the only channel to the UI |
-| `lib/agent/workspace.ts` | Temp workspace + `SCHEMA.md`, shared memory between stages |
+| `lib/agent/workspace.ts` | Temp workspace + `PORTFOLIO.md`, shared memory between stages |
 | `lib/agent/bus.ts` | Async queue merging SDK messages with tool output |
 | `app/api/audit/route.ts` | Streams the run as NDJSON |
 | `hooks/use-audit-engine.ts` | Client run state machine |
-| `components/app/` | Console: schema builder, intake, connectors, canvas, matrix, findings |
+| `lib/budget.ts` | Run budget bounds, clamping, and the per-portfolio suggestion |
+| `components/app/` | Console: intake, budget, connectors, run canvas, findings |
 | `public/samples/` | Sample lease portfolio with planted defects |
 
 ## Deploy

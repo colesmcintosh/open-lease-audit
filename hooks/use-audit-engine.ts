@@ -2,69 +2,10 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { AuditEvent } from "@/lib/audit-events";
-import { columnKey } from "@/lib/columns";
+import { clampBudget, DEFAULT_BUDGET_USD } from "@/lib/budget";
 import { CONNECTORS, type ConnectorConfig } from "@/lib/connectors";
 import { consumeAuditStream } from "@/lib/event-stream";
-import type {
-  AgentRun,
-  AuditState,
-  ColumnDef,
-  ExtractionState,
-  Finding,
-  LeaseDoc,
-  Phase,
-} from "@/lib/types";
-
-export const DEFAULT_COLUMNS: ColumnDef[] = [
-  {
-    id: "col-tenant",
-    name: "Tenant",
-    description: "Full legal name of the tenant entity as written in the lease.",
-    type: "text",
-  },
-  {
-    id: "col-landlord",
-    name: "Landlord",
-    description: "Full legal name of the landlord entity as written in the lease.",
-    type: "text",
-  },
-  {
-    id: "col-base-rent",
-    name: "Monthly Base Rent",
-    description: "Initial monthly base rent amount.",
-    type: "currency",
-  },
-  {
-    id: "col-start",
-    name: "Commencement Date",
-    description: "Date the lease term commences.",
-    type: "date",
-  },
-  {
-    id: "col-end",
-    name: "Expiration Date",
-    description: "Date the lease term expires.",
-    type: "date",
-  },
-  {
-    id: "col-deposit",
-    name: "Security Deposit",
-    description: "Security deposit amount held by the landlord.",
-    type: "currency",
-  },
-  {
-    id: "col-escalation",
-    name: "Annual Escalation %",
-    description: "Annual base rent escalation percentage, if any.",
-    type: "number",
-  },
-  {
-    id: "col-renewal",
-    name: "Renewal Option",
-    description: "Whether the tenant holds an option to renew the lease.",
-    type: "boolean",
-  },
-];
+import type { AgentRun, AuditState, LeaseDoc, Phase } from "@/lib/types";
 
 const EMPTY_AUDIT: AuditState = {
   status: "idle",
@@ -123,31 +64,17 @@ function fileToDoc(file: File): Promise<LeaseDoc> {
 }
 
 export function useAuditEngine() {
-  const [columns, setColumns] = useState<ColumnDef[]>(DEFAULT_COLUMNS);
   const [docs, setDocs] = useState<LeaseDoc[]>([]);
+  const [budgetUsd, setBudget] = useState(DEFAULT_BUDGET_USD);
   const [connectors, setConnectors] = useState<ConnectorConfig[]>([]);
-  const [extractions, setExtractions] = useState<Record<string, ExtractionState>>({});
   const [agents, setAgents] = useState<AgentRun[]>([]);
   const [leadNote, setLeadNote] = useState("");
   const [audit, setAudit] = useState<AuditState>(EMPTY_AUDIT);
   const [isRunning, setIsRunning] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  const addColumn = useCallback(() => {
-    setColumns((prev) => [
-      ...prev,
-      { id: newId("col"), name: "", description: "", type: "text" },
-    ]);
-  }, []);
-
-  const updateColumn = useCallback((id: string, patch: Partial<ColumnDef>) => {
-    setColumns((prev) =>
-      prev.map((column) => (column.id === id ? { ...column, ...patch } : column))
-    );
-  }, []);
-
-  const removeColumn = useCallback((id: string) => {
-    setColumns((prev) => prev.filter((column) => column.id !== id));
+  const setBudgetUsd = useCallback((value: number) => {
+    setBudget(clampBudget(value, DEFAULT_BUDGET_USD));
   }, []);
 
   const addFiles = useCallback(async (files: Iterable<File>) => {
@@ -161,11 +88,6 @@ export function useAuditEngine() {
 
   const removeDoc = useCallback((id: string) => {
     setDocs((prev) => prev.filter((doc) => doc.id !== id));
-    setExtractions((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
   }, []);
 
   /** Connector credentials live in memory only — they are never persisted. */
@@ -183,7 +105,6 @@ export function useAuditEngine() {
   const reset = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    setExtractions({});
     setAgents([]);
     setLeadNote("");
     setAudit(EMPTY_AUDIT);
@@ -205,11 +126,6 @@ export function useAuditEngine() {
   const applyEvent = useCallback((event: AuditEvent) => {
     switch (event.type) {
       case "run_started":
-        setExtractions(
-          Object.fromEntries(
-            event.leases.map((lease) => [lease.id, { status: "queued", record: {} }])
-          )
-        );
         setAgents([LEAD_AGENT]);
         break;
 
@@ -223,18 +139,8 @@ export function useAuditEngine() {
             status: "running",
             activity: "Reading the brief",
             toolCalls: 0,
-            ...(event.leaseId ? { leaseId: event.leaseId } : {}),
           },
         ]);
-        if (event.leaseId) {
-          setExtractions((prev) => ({
-            ...prev,
-            [event.leaseId!]: {
-              status: "extracting",
-              record: prev[event.leaseId!]?.record ?? {},
-            },
-          }));
-        }
         break;
 
       case "agent_activity":
@@ -264,13 +170,6 @@ export function useAuditEngine() {
             agent.id === "lead" ? { ...agent, activity: event.text } : agent
           )
         );
-        break;
-
-      case "abstract":
-        setExtractions((prev) => ({
-          ...prev,
-          [event.leaseId]: { status: "extracted", record: event.fields },
-        }));
         break;
 
       case "candidate":
@@ -320,30 +219,12 @@ export function useAuditEngine() {
             agent.status === "running" ? { ...agent, status: "done" } : agent
           )
         );
-        // Any lease no agent ever reported on stays honest about that.
-        setExtractions((prev) =>
-          Object.fromEntries(
-            Object.entries(prev).map(([id, state]) =>
-              state.status === "extracted"
-                ? [id, state]
-                : [
-                    id,
-                    {
-                      ...state,
-                      status: "error",
-                      error: "No abstract was reported for this lease.",
-                    },
-                  ]
-            )
-          )
-        );
         break;
     }
   }, []);
 
   const run = useCallback(async () => {
-    const activeColumns = columns.filter((column) => column.name.trim());
-    if (!docs.length || !activeColumns.length || isRunning) return;
+    if (!docs.length || isRunning) return;
 
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -353,14 +234,11 @@ export function useAuditEngine() {
     setLeadNote("");
     setAgents([LEAD_AGENT]);
     setAudit({ ...EMPTY_AUDIT, status: "running" });
-    setExtractions(
-      Object.fromEntries(docs.map((doc) => [doc.id, { status: "queued", record: {} }]))
-    );
 
     try {
       await consumeAuditStream({
         url: "/api/audit",
-        body: { columns: activeColumns, docs, connectors },
+        body: { docs, connectors, budgetUsd },
         signal: controller.signal,
         onEvent: applyEvent,
       });
@@ -376,7 +254,7 @@ export function useAuditEngine() {
       if (abortRef.current === controller) abortRef.current = null;
       setIsRunning(false);
     }
-  }, [applyEvent, columns, connectors, docs, isRunning]);
+  }, [applyEvent, budgetUsd, connectors, docs, isRunning]);
 
   const phase: Phase = useMemo(() => {
     if (audit.status === "error") return "error";
@@ -384,62 +262,20 @@ export function useAuditEngine() {
     if (audit.status !== "running") return "configure";
     const running = agents.filter((agent) => agent.status === "running");
     if (running.some((agent) => agent.type === "materiality-gate")) return "gating";
-    if (running.some((agent) => agent.type.endsWith("-auditor") || agent.type.endsWith("-reconciler")))
-      return "detecting";
-    if (running.some((agent) => agent.type === "lease-abstractor")) return "abstracting";
-    return audit.findings.length || audit.candidates.length ? "gating" : "abstracting";
-  }, [agents, audit.candidates.length, audit.findings.length, audit.status]);
-
-  /** Cells a published finding touches, as "leaseName::columnKey". */
-  const flaggedCells = useMemo(() => {
-    const flagged = new Map<string, Finding["severity"]>();
-    const byPath = new Map<string, string>();
-    for (const doc of docs) {
-      byPath.set(doc.name.toLowerCase(), doc.name);
-    }
-    const resolveLease = (label: string) => {
-      const base = label.split("/").pop()?.toLowerCase() ?? label.toLowerCase();
-      return (
-        byPath.get(label.toLowerCase()) ??
-        docs.find((doc) => {
-          const name = doc.name.toLowerCase();
-          return name === base || base.startsWith(name.replace(/\.[^.]+$/, ""));
-        })?.name ??
-        docs.find((doc) => base.includes(doc.name.toLowerCase().replace(/\.[^.]+$/, "")))
-          ?.name
-      );
-    };
-
-    for (const finding of audit.findings) {
-      for (const rawLease of finding.leases) {
-        const lease = resolveLease(rawLease);
-        if (!lease) continue;
-        for (const column of finding.columns) {
-          const key = `${lease}::${columnKey(column)}`;
-          if (finding.severity === "critical" || !flagged.has(key)) {
-            flagged.set(key, finding.severity);
-          }
-        }
-      }
-    }
-    return flagged;
-  }, [audit.findings, docs]);
+    return audit.findings.length ? "gating" : "detecting";
+  }, [agents, audit.findings.length, audit.status]);
 
   return {
-    columns,
     docs,
+    budgetUsd,
     connectors,
     connectorCatalog: CONNECTORS,
-    extractions,
     agents,
     leadNote,
     audit,
     phase,
     isRunning,
-    flaggedCells,
-    addColumn,
-    updateColumn,
-    removeColumn,
+    setBudgetUsd,
     addFiles,
     addDocs,
     removeDoc,

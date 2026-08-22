@@ -1,8 +1,7 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { TYPE_GUIDANCE } from "@/lib/columns";
-import type { ColumnDef, LeaseDoc } from "@/lib/types";
+import type { LeaseDoc } from "@/lib/types";
 
 export interface WorkspaceLease {
   doc: LeaseDoc;
@@ -13,8 +12,6 @@ export interface WorkspaceLease {
 export interface Workspace {
   root: string;
   leases: WorkspaceLease[];
-  /** Directory the record_abstract tool writes per-lease JSON into. */
-  abstractsDir: string;
   /** Directory the report_candidate tool writes per-candidate JSON into. */
   candidatesDir: string;
   dispose: () => Promise<void>;
@@ -31,67 +28,42 @@ function slugify(name: string, fallback: string): string {
   return `${base || fallback}${ext === ".pdf" ? ".pdf" : ".txt"}`;
 }
 
-function schemaDoc(columns: ColumnDef[], leases: WorkspaceLease[], today: string) {
-  const fields = columns
-    .map(
-      (column) =>
-        `| \`${column.name}\` | ${column.type} | ${column.description} | ${TYPE_GUIDANCE[column.type]} |`
-    )
-    .join("\n");
+function portfolioDoc(leases: WorkspaceLease[], today: string) {
+  return `# Portfolio
 
-  return `# Abstraction schema
+Today's date is **${today}**. Measure every deadline, notice window, and
+expiration against that date.
 
-Today's date is **${today}**. Treat every deadline, notice window, and expiration
-against that date.
-
-The portfolio owner asked for these fields, in their own words. Report values
-using the **exact** column name in the first row so they land in the right column.
-
-| Column | Type | What they want | Format |
-| --- | --- | --- | --- |
-${fields}
-
-## Rules
-
-- Never invent a value. If the lease genuinely does not specify a field, report
-  it as \`null\` — a missing term is itself a signal for the auditors downstream.
-- Every non-null value carries a short **verbatim** quote from the lease as
-  evidence. Quote the document, do not paraphrase it.
-- Confidence: \`high\` = stated explicitly, \`medium\` = derived or paraphrased,
-  \`low\` = ambiguous or assembled from several clauses.
-- Read the whole document before reporting. Terms are frequently defined in one
-  place and contradicted in another; that contradiction is the point.
-
-## Portfolio
+## Documents
 
 ${leases.map((lease) => `- \`${lease.relPath}\` (original name: ${lease.doc.name})`).join("\n")}
+
+Read each one end to end. Commercial leases define a term in one section and
+modify it in another, and the modification is what governs — so a clause you
+found by keyword still has to be read in context before you rely on it.
 `;
 }
 
 /**
  * Materializes the uploaded portfolio on disk so the agents can read it with
  * their own file tools. The workspace doubles as shared memory between stages:
- * abstracts and candidates are written back into it, so a later subagent reads
- * an earlier one's output from disk instead of through the orchestrator's
- * context window.
+ * candidates are written back into it, so the materiality gate reads the
+ * detectors' output from disk instead of through the orchestrator's context
+ * window.
  */
 export async function createWorkspace({
   docs,
-  columns,
   today,
 }: {
   docs: LeaseDoc[];
-  columns: ColumnDef[];
   today: string;
 }): Promise<Workspace> {
   const root = await mkdtemp(path.join(tmpdir(), "lease-audit-"));
   const leaseDir = path.join(root, "leases");
-  const abstractsDir = path.join(root, "abstracts");
   const candidatesDir = path.join(root, "candidates");
 
   await Promise.all([
     mkdir(leaseDir, { recursive: true }),
-    mkdir(abstractsDir, { recursive: true }),
     mkdir(candidatesDir, { recursive: true }),
   ]);
 
@@ -117,15 +89,14 @@ export async function createWorkspace({
   }
 
   await writeFile(
-    path.join(root, "SCHEMA.md"),
-    schemaDoc(columns, leases, today),
+    path.join(root, "PORTFOLIO.md"),
+    portfolioDoc(leases, today),
     "utf8"
   );
 
   return {
     root,
     leases,
-    abstractsDir,
     candidatesDir,
     dispose: () => rm(root, { recursive: true, force: true }),
   };

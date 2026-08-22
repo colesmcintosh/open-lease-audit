@@ -1,7 +1,6 @@
 import type {
   AgentStatus,
   Candidate,
-  CellValue,
   Dismissal,
   Finding,
   PortfolioRisk,
@@ -13,22 +12,10 @@ import type {
  */
 export type AuditEvent =
   | { type: "run_started"; leases: Array<{ id: string; relPath: string }> }
-  | {
-      type: "agent_started";
-      id: string;
-      agent: string;
-      label: string;
-      /** Lease id, when this agent was dispatched to abstract one document. */
-      leaseId?: string;
-    }
+  | { type: "agent_started"; id: string; agent: string; label: string }
   | { type: "agent_activity"; id: string; activity: string }
   | { type: "agent_finished"; id: string; status: Extract<AgentStatus, "done" | "error"> }
   | { type: "lead_note"; text: string }
-  | {
-      type: "abstract";
-      leaseId: string;
-      fields: Record<string, CellValue>;
-    }
   | { type: "candidate"; candidate: Candidate }
   | { type: "finding"; finding: Finding }
   | { type: "dismissal"; dismissal: Dismissal }

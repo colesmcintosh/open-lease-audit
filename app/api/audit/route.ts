@@ -2,7 +2,7 @@ import { runAudit } from "@/lib/agent/run";
 import { encodeEvent } from "@/lib/audit-events";
 import { describeRunError } from "@/lib/credentials";
 import type { ConnectorConfig } from "@/lib/connectors";
-import type { ColumnDef, LeaseDoc } from "@/lib/types";
+import type { LeaseDoc } from "@/lib/types";
 
 // The SDK drives a Claude Code subprocess, so this route needs the Node
 // runtime and a long ceiling: a portfolio audit is minutes of agent work.
@@ -10,22 +10,22 @@ export const runtime = "nodejs";
 export const maxDuration = 800;
 
 interface AuditRequest {
-  columns: ColumnDef[];
   docs: LeaseDoc[];
   connectors?: ConnectorConfig[];
+  budgetUsd?: number;
 }
 
 export async function POST(req: Request) {
-  const { columns, docs, connectors } = (await req.json()) as AuditRequest;
-  if (!columns?.length || !docs?.length) {
-    return new Response("Missing columns or documents.", { status: 400 });
+  const { docs, connectors, budgetUsd } = (await req.json()) as AuditRequest;
+  if (!docs?.length) {
+    return new Response("No documents to audit.", { status: 400 });
   }
 
   const encoder = new TextEncoder();
   const events = runAudit({
     docs,
-    columns,
     connectors: connectors ?? [],
+    budgetUsd,
     signal: req.signal,
   });
 

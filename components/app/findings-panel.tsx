@@ -157,7 +157,7 @@ export function FindingsPanel({ audit }: { audit: AuditState }) {
                   </div>
                 )}
 
-                {(finding.leases.length > 0 || finding.columns.length > 0) && (
+                {finding.leases.length > 0 && (
                   <div className="flex flex-wrap items-center gap-1 pt-0.5">
                     {finding.leases.map((lease) => (
                       <Badge
@@ -166,15 +166,6 @@ export function FindingsPanel({ audit }: { audit: AuditState }) {
                         className="rounded-xs px-1.5 py-0 font-mono text-[9px] text-foreground/70"
                       >
                         {lease.split("/").pop()}
-                      </Badge>
-                    ))}
-                    {finding.columns.map((column) => (
-                      <Badge
-                        key={column}
-                        variant="outline"
-                        className="rounded-xs border-primary/30 px-1.5 py-0 font-mono text-[9px] text-primary/80"
-                      >
-                        {column}
                       </Badge>
                     ))}
                   </div>
