@@ -1,7 +1,7 @@
 "use client";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { columnKey } from "@/lib/audit-schema";
+import { columnKey } from "@/lib/columns";
 import { cn } from "@/lib/utils";
 import type {
   CellValue,
@@ -25,8 +25,7 @@ const CONFIDENCE_TONE = {
 
 const FLAG_RING: Record<FindingSeverity, string> = {
   critical: "shadow-[inset_0_0_0_1px_var(--critical)] bg-critical/10",
-  warning: "shadow-[inset_0_0_0_1px_var(--warn)] bg-warn/10",
-  info: "shadow-[inset_0_0_0_1px_var(--ring)] bg-primary/10",
+  major: "shadow-[inset_0_0_0_1px_var(--warn)] bg-warn/10",
 };
 
 function formatValue(cell: CellValue, type: ColumnDef["type"]) {
@@ -139,8 +138,8 @@ export function ExtractionMatrix({
           <p className="microlabel">Awaiting documents</p>
         </div>
         <p className="max-w-sm text-center text-[11px] text-muted-foreground">
-          Upload lease files or load the sample portfolio. Extracted fields will
-          stream into this matrix in real time.
+          Upload lease files or load the sample portfolio. Abstracted fields
+          stream into this matrix as each agent reports.
         </p>
       </div>
     );
